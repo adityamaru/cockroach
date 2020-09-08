@@ -458,7 +458,7 @@ func backupPlanHook(
 					}
 				}
 
-				prev, err := findPriorBackups(ctx, defaultStore)
+				prev, err := findPriorBackupNames(ctx, defaultStore)
 				if err != nil {
 					return errors.Wrapf(err, "determining base for incremental backup")
 				}

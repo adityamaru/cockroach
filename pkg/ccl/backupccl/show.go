@@ -102,7 +102,7 @@ func showBackupPlanHook(
 			encryption = &roachpb.FileEncryptionOptions{Key: encryptionKey}
 		}
 
-		incPaths, err := findPriorBackups(ctx, store)
+		incPaths, err := findPriorBackupNames(ctx, store)
 		if err != nil {
 			if errors.Is(err, cloud.ErrListingUnsupported) {
 				// If we do not support listing, we have to just assume there are none
