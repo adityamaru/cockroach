@@ -13,7 +13,6 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/cockroachdb/cockroach/pkg/ccl/storageccl"
 	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/kv"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
@@ -35,7 +34,7 @@ type splitAndScatterer interface {
 	// splitAndScatterSpan issues a split request at a given key and then scatters
 	// the range around the cluster. It returns the node ID of the leaseholder of
 	// the span after the scatter.
-	splitAndScatterKey(ctx context.Context, codec keys.SQLCodec, db *kv.DB, kr *storageccl.KeyRewriter, key roachpb.Key, randomizeLeases bool) (roachpb.NodeID, error)
+	splitAndScatterKey(ctx context.Context, codec keys.SQLCodec, db *kv.DB, kr *KeyRewriter, key roachpb.Key, randomizeLeases bool) (roachpb.NodeID, error)
 }
 
 // dbSplitAndScatter is the production implementation of this processor's
@@ -51,7 +50,7 @@ func (s dbSplitAndScatterer) splitAndScatterKey(
 	ctx context.Context,
 	codec keys.SQLCodec,
 	db *kv.DB,
-	kr *storageccl.KeyRewriter,
+	kr *KeyRewriter,
 	key roachpb.Key,
 	randomizeLeases bool,
 ) (roachpb.NodeID, error) {
@@ -228,7 +227,7 @@ func runSplitAndScatter(
 ) error {
 	g := ctxgroup.WithContext(ctx)
 	db := flowCtx.Cfg.DB
-	kr, err := storageccl.MakeKeyRewriterFromRekeys(spec.Rekeys)
+	kr, err := MakeKeyRewriterFromRekeys(spec.Rekeys)
 	if err != nil {
 		return err
 	}

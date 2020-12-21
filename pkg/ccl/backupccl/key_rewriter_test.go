@@ -6,7 +6,7 @@
 //
 //     https://github.com/cockroachdb/cockroach/blob/master/licenses/CCL.txt
 
-package storageccl
+package backupccl
 
 import (
 	"bytes"
@@ -17,11 +17,10 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/systemschema"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/tabledesc"
+	"github.com/cockroachdb/cockroach/pkg/sql/execinfrapb"
 	"github.com/cockroachdb/cockroach/pkg/sql/rowenc"
 	"github.com/cockroachdb/cockroach/pkg/util/encoding"
-	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
-	"github.com/cockroachdb/cockroach/pkg/util/protoutil"
 )
 
 func TestPrefixRewriter(t *testing.T) {
@@ -65,7 +64,7 @@ func TestKeyRewriter(t *testing.T) {
 	oldID := desc.ID
 	newID := desc.ID + 1
 	desc.ID = newID
-	rekeys := []roachpb.ImportRequest_TableRekey{
+	rekeys := []execinfrapb.TableRekey{
 		{
 			OldID:   uint32(oldID),
 			NewDesc: mustMarshalDesc(t, desc.TableDesc()),
@@ -121,7 +120,7 @@ func TestKeyRewriter(t *testing.T) {
 		desc.ID = oldID + 10
 		desc2 := tabledesc.NewCreatedMutable(desc.TableDescriptor)
 		desc2.ID += 10
-		newKr, err := MakeKeyRewriterFromRekeys([]roachpb.ImportRequest_TableRekey{
+		newKr, err := MakeKeyRewriterFromRekeys([]execinfrapb.TableRekey{
 			{OldID: uint32(oldID), NewDesc: mustMarshalDesc(t, desc.TableDesc())},
 			{OldID: uint32(desc.ID), NewDesc: mustMarshalDesc(t, desc2.TableDesc())},
 		})
@@ -145,17 +144,6 @@ func TestKeyRewriter(t *testing.T) {
 			t.Fatalf("got %d expected %d", id, desc.ID+1)
 		}
 	})
-}
-
-func mustMarshalDesc(t *testing.T, tableDesc *descpb.TableDescriptor) []byte {
-	desc := tabledesc.NewImmutable(*tableDesc).DescriptorProto()
-	// Set the timestamp to a non-zero value.
-	descpb.TableFromDescriptor(desc, hlc.Timestamp{WallTime: 1})
-	bytes, err := protoutil.Marshal(desc)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return bytes
 }
 
 func BenchmarkPrefixRewriter(b *testing.B) {

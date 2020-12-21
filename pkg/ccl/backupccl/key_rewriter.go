@@ -6,7 +6,7 @@
 //
 //     https://github.com/cockroachdb/cockroach/blob/master/licenses/CCL.txt
 
-package storageccl
+package backupccl
 
 import (
 	"bytes"
@@ -15,6 +15,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/tabledesc"
+	"github.com/cockroachdb/cockroach/pkg/sql/execinfrapb"
 	"github.com/cockroachdb/cockroach/pkg/util/encoding"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/protoutil"
@@ -31,7 +32,7 @@ type prefixRewrite struct {
 // rewrite rules.
 type prefixRewriter []prefixRewrite
 
-// RewriteKey modifies key using the first matching rule and returns
+// rewriteKey modifies key using the first matching rule and returns
 // it. If no rules matched, returns false and the original input key.
 func (p prefixRewriter) rewriteKey(key []byte) ([]byte, bool) {
 	for _, rewrite := range p {
@@ -59,7 +60,7 @@ type KeyRewriter struct {
 }
 
 // MakeKeyRewriterFromRekeys makes a KeyRewriter from Rekey protos.
-func MakeKeyRewriterFromRekeys(rekeys []roachpb.ImportRequest_TableRekey) (*KeyRewriter, error) {
+func MakeKeyRewriterFromRekeys(rekeys []execinfrapb.TableRekey) (*KeyRewriter, error) {
 	descs := make(map[descpb.ID]*tabledesc.Immutable)
 	for _, rekey := range rekeys {
 		var desc descpb.Descriptor
@@ -84,8 +85,8 @@ func MakeKeyRewriter(descs map[descpb.ID]*tabledesc.Immutable) (*KeyRewriter, er
 		// map to avoid duplicating entries.
 
 		for _, index := range desc.AllNonDropIndexes() {
-			oldPrefix := roachpb.Key(makeKeyRewriterPrefixIgnoringInterleaved(oldID, index.ID))
-			newPrefix := roachpb.Key(makeKeyRewriterPrefixIgnoringInterleaved(desc.ID, index.ID))
+			oldPrefix := roachpb.Key(MakeKeyRewriterPrefixIgnoringInterleaved(oldID, index.ID))
+			newPrefix := roachpb.Key(MakeKeyRewriterPrefixIgnoringInterleaved(desc.ID, index.ID))
 			if !seenPrefixes[string(oldPrefix)] {
 				seenPrefixes[string(oldPrefix)] = true
 				prefixes = append(prefixes, prefixRewrite{
@@ -113,11 +114,11 @@ func MakeKeyRewriter(descs map[descpb.ID]*tabledesc.Immutable) (*KeyRewriter, er
 	}, nil
 }
 
-// makeKeyRewriterPrefixIgnoringInterleaved creates a table/index prefix for
+// MakeKeyRewriterPrefixIgnoringInterleaved creates a table/index prefix for
 // the given table and index IDs. sqlbase.MakeIndexKeyPrefix is a similar
 // function, but it takes into account interleaved ancestors, which we don't
 // want here.
-func makeKeyRewriterPrefixIgnoringInterleaved(tableID descpb.ID, indexID descpb.IndexID) []byte {
+func MakeKeyRewriterPrefixIgnoringInterleaved(tableID descpb.ID, indexID descpb.IndexID) []byte {
 	return keys.TODOSQLCodec.IndexPrefix(uint32(tableID), uint32(indexID))
 }
 

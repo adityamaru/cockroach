@@ -1,16 +1,17 @@
-// Copyright 2017 The Cockroach Authors.
+// Copyright 2020 The Cockroach Authors.
 //
-// Licensed as a CockroachDB Enterprise file under the Cockroach Community
-// License (the "License"); you may not use this file except in compliance with
-// the License. You may obtain a copy of the License at
+// Use of this software is governed by the Business Source License
+// included in the file licenses/BSL.txt.
 //
-//     https://github.com/cockroachdb/cockroach/blob/master/licenses/CCL.txt
-
-package storageccl
+// As of the Change Date specified in that file, in accordance with
+// the Business Source License, use of this software will be governed
+// by the Apache License, Version 2.0, included in the file
+// licenses/APL.txt.
+package backupccl
 
 import (
 	"context"
-	"fmt"
+	fmt "fmt"
 	"io/ioutil"
 	"os"
 	"path/filepath"
@@ -21,21 +22,29 @@ import (
 	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/base"
+	"github.com/cockroachdb/cockroach/pkg/blobs"
 	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/kv"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/kvserverbase"
-	"github.com/cockroachdb/cockroach/pkg/roachpb"
+	roachpb "github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/security"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
-	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
+	descpb "github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/tabledesc"
+	"github.com/cockroachdb/cockroach/pkg/sql/execinfra"
+	"github.com/cockroachdb/cockroach/pkg/sql/execinfrapb"
+	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/storage"
+	"github.com/cockroachdb/cockroach/pkg/storage/cloud"
 	"github.com/cockroachdb/cockroach/pkg/storage/cloudimpl"
 	"github.com/cockroachdb/cockroach/pkg/testutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/serverutils"
 	"github.com/cockroachdb/cockroach/pkg/util/encoding"
-	"github.com/cockroachdb/cockroach/pkg/util/hlc"
+	hlc "github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
+	"github.com/cockroachdb/cockroach/pkg/util/protoutil"
+	"github.com/stretchr/testify/require"
 )
 
 func TestMaxImportBatchSize(t *testing.T) {
@@ -62,9 +71,10 @@ func TestMaxImportBatchSize(t *testing.T) {
 }
 
 func slurpSSTablesLatestKey(
-	t *testing.T, dir string, paths []string, kr prefixRewriter,
+	t *testing.T, dir string, paths []string, oldPrefix, newPrefix []byte,
 ) []storage.MVCCKeyValue {
 	start, end := storage.MVCCKey{Key: keys.MinKey}, storage.MVCCKey{Key: keys.MaxKey}
+	kr := prefixRewriter{{OldPrefix: oldPrefix, NewPrefix: newPrefix}}
 
 	e := storage.NewDefaultInMem()
 	defer e.Close()
@@ -147,6 +157,17 @@ func clientKVsToEngineKVs(kvs []kv.KeyValue) []storage.MVCCKeyValue {
 	return ret
 }
 
+func mustMarshalDesc(t *testing.T, tableDesc *descpb.TableDescriptor) []byte {
+	desc := tabledesc.NewImmutable(*tableDesc).DescriptorProto()
+	// Set the timestamp to a non-zero value.
+	descpb.TableFromDescriptor(desc, hlc.Timestamp{WallTime: 1})
+	bytes, err := protoutil.Marshal(desc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return bytes
+}
+
 func TestImport(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	t.Run("batch=default", func(t *testing.T) {
@@ -177,7 +198,7 @@ func runTestImport(t *testing.T, init func(*cluster.Settings)) {
 		indexID = 1
 	)
 
-	srcPrefix := makeKeyRewriterPrefixIgnoringInterleaved(oldID, indexID)
+	srcPrefix := MakeKeyRewriterPrefixIgnoringInterleaved(oldID, indexID)
 	var keys []roachpb.Key
 	for i := 0; i < 8; i++ {
 		key := append([]byte(nil), srcPrefix...)
@@ -243,6 +264,13 @@ func runTestImport(t *testing.T, init func(*cluster.Settings)) {
 	defer s.Stopper().Stop(ctx)
 	init(s.ClusterSettings())
 
+	evalCtx := tree.EvalContext{Settings: s.ClusterSettings()}
+	flowCtx := execinfra.FlowCtx{Cfg: &execinfra.ServerConfig{DB: kvDB,
+		ExternalStorage: func(ctx context.Context, dest roachpb.ExternalStorage) (cloud.ExternalStorage, error) {
+			return cloudimpl.MakeExternalStorage(ctx, dest, base.ExternalIODirConfig{},
+				nil, blobs.TestBlobServiceClient(s.ClusterSettings().ExternalIODir), nil, nil)
+		}}}
+
 	storage, err := cloudimpl.ExternalStorageConfFromURI("nodelocal://0/foo", security.RootUserName())
 	if err != nil {
 		t.Fatalf("%+v", err)
@@ -297,11 +325,9 @@ func runTestImport(t *testing.T, init func(*cluster.Settings)) {
 	} {
 		t.Run(fmt.Sprintf("%d-%v", i, testCase), func(t *testing.T) {
 			newID := descpb.ID(100 + i)
-			kr := prefixRewriter{{
-				OldPrefix: srcPrefix,
-				NewPrefix: makeKeyRewriterPrefixIgnoringInterleaved(newID, indexID),
-			}}
-			rekeys := []roachpb.ImportRequest_TableRekey{
+			newPrefix := MakeKeyRewriterPrefixIgnoringInterleaved(newID, indexID)
+			kr := prefixRewriter{{OldPrefix: srcPrefix, NewPrefix: newPrefix}}
+			rekeys := []execinfrapb.TableRekey{
 				{
 					OldID: oldID,
 					NewDesc: mustMarshalDesc(t, &descpb.TableDescriptor{
@@ -342,45 +368,46 @@ func runTestImport(t *testing.T, init func(*cluster.Settings)) {
 
 			atomic.StoreInt64(&remainingAmbiguousSubReqs, initialAmbiguousSubReqs)
 
-			req := &roachpb.ImportRequest{
-				RequestHeader: roachpb.RequestHeader{Key: reqStartKey},
-				DataSpan:      roachpb.Span{Key: first, EndKey: last.PrefixEnd()},
-				Rekeys:        rekeys,
+			mockRestoreDataSpec := execinfrapb.RestoreDataSpec{
+				Rekeys: rekeys,
+			}
+			restoreSpanEntry := execinfrapb.RestoreSpanEntry{
+				Span: roachpb.Span{Key: first, EndKey: last.PrefixEnd()},
 			}
 
 			var slurp []string
 			for ks := range testCase {
 				f := writeSST(t, testCase[ks])
 				slurp = append(slurp, f)
-				req.Files = append(req.Files, roachpb.ImportRequest_File{Dir: storage, Path: f})
+				restoreSpanEntry.Files = append(restoreSpanEntry.Files,
+					execinfrapb.RestoreFileSpec{Dir: storage, Path: f})
 			}
-			expectedKVs := slurpSSTablesLatestKey(t, filepath.Join(dir, "foo"), slurp, kr)
+			expectedKVs := slurpSSTablesLatestKey(t, filepath.Join(dir, "foo"), slurp, srcPrefix,
+				newPrefix)
 
-			// Import may be retried by DistSender if it takes too long to return, so
-			// make sure it's idempotent.
-			for j := 0; j < 2; j++ {
-				b := &kv.Batch{}
-				b.AddRawRequest(req)
-				if err := kvDB.Run(ctx, b); err != nil {
-					t.Fatalf("%+v", err)
-				}
-				clientKVs, err := kvDB.Scan(ctx, reqStartKey, reqEndKey, 0)
-				if err != nil {
-					t.Fatalf("%+v", err)
-				}
-				kvs := clientKVsToEngineKVs(clientKVs)
+			mockRestoreDataProcessor, err := newTestingRestoreDataProcessor(ctx, &evalCtx,
+				&flowCtx, mockRestoreDataSpec)
+			require.NoError(t, err)
 
-				if !reflect.DeepEqual(kvs, expectedKVs) {
-					for i := 0; i < len(kvs) || i < len(expectedKVs); i++ {
-						if i < len(expectedKVs) {
-							t.Logf("expected %d\t%v\t%v", i, expectedKVs[i].Key, expectedKVs[i].Value)
-						}
-						if i < len(kvs) {
-							t.Logf("got      %d\t%v\t%v", i, kvs[i].Key, kvs[i].Value)
-						}
+			_, err = mockRestoreDataProcessor.ProcessRestoreSpanEntry(restoreSpanEntry, reqStartKey)
+			require.NoError(t, err)
+
+			clientKVs, err := kvDB.Scan(ctx, reqStartKey, reqEndKey, 0)
+			if err != nil {
+				t.Fatalf("%+v", err)
+			}
+			kvs := clientKVsToEngineKVs(clientKVs)
+
+			if !reflect.DeepEqual(kvs, expectedKVs) {
+				for i := 0; i < len(kvs) || i < len(expectedKVs); i++ {
+					if i < len(expectedKVs) {
+						t.Logf("expected %d\t%v\t%v", i, expectedKVs[i].Key, expectedKVs[i].Value)
 					}
-					t.Fatalf("got %+v expected %+v", kvs, expectedKVs)
+					if i < len(kvs) {
+						t.Logf("got      %d\t%v\t%v", i, kvs[i].Key, kvs[i].Value)
+					}
 				}
+				t.Fatalf("got %+v expected %+v", kvs, expectedKVs)
 			}
 
 			if r := atomic.LoadInt64(&remainingAmbiguousSubReqs); r > 0 {

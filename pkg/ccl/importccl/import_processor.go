@@ -14,7 +14,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/cockroachdb/cockroach/pkg/ccl/storageccl"
+	"github.com/cockroachdb/cockroach/pkg/ccl/backupccl"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/kvserverbase"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/tabledesc"
@@ -251,7 +251,7 @@ func ingestKvs(
 
 	writeTS := hlc.Timestamp{WallTime: spec.WalltimeNanos}
 
-	flushSize := func() int64 { return storageccl.MaxImportBatchSize(flowCtx.Cfg.Settings) }
+	flushSize := func() int64 { return backupccl.MaxImportBatchSize(flowCtx.Cfg.Settings) }
 
 	// We create two bulk adders so as to combat the excessive flushing of small
 	// SSTs which was observed when using a single adder for both primary and
@@ -262,7 +262,7 @@ func ingestKvs(
 	// of the pkIndexAdder buffer be set below that of the indexAdder buffer.
 	// Otherwise, as a consequence of filling up faster the pkIndexAdder buffer
 	// will hog memory as it tries to grow more aggressively.
-	minBufferSize, maxBufferSize, stepSize := storageccl.ImportBufferConfigSizes(flowCtx.Cfg.Settings, true /* isPKAdder */)
+	minBufferSize, maxBufferSize, stepSize := backupccl.ImportBufferConfigSizes(flowCtx.Cfg.Settings, true /* isPKAdder */)
 	pkIndexAdder, err := flowCtx.Cfg.BulkAdder(ctx, flowCtx.Cfg.DB, writeTS, kvserverbase.BulkAdderOptions{
 		Name:              "pkAdder",
 		DisallowShadowing: true,
@@ -277,7 +277,8 @@ func ingestKvs(
 	}
 	defer pkIndexAdder.Close(ctx)
 
-	minBufferSize, maxBufferSize, stepSize = storageccl.ImportBufferConfigSizes(flowCtx.Cfg.Settings, false /* isPKAdder */)
+	minBufferSize, maxBufferSize, stepSize = backupccl.ImportBufferConfigSizes(flowCtx.Cfg.Settings,
+		false /* isPKAdder */)
 	indexAdder, err := flowCtx.Cfg.BulkAdder(ctx, flowCtx.Cfg.DB, writeTS, kvserverbase.BulkAdderOptions{
 		Name:              "indexAdder",
 		DisallowShadowing: true,

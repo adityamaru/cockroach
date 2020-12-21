@@ -16,7 +16,10 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/base"
 	"github.com/cockroachdb/cockroach/pkg/ccl/storageccl"
 	"github.com/cockroachdb/cockroach/pkg/kv/bulk"
+	"github.com/cockroachdb/cockroach/pkg/kv/kvserver"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
+	"github.com/cockroachdb/cockroach/pkg/settings"
+	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
 	"github.com/cockroachdb/cockroach/pkg/sql"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfra"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfrapb"
@@ -33,6 +36,91 @@ import (
 	gogotypes "github.com/gogo/protobuf/types"
 )
 
+var importBatchSize = func() *settings.ByteSizeSetting {
+	s := settings.RegisterByteSizeSetting(
+		"kv.bulk_ingest.batch_size",
+		"the maximum size of the payload in an AddSSTable request",
+		16<<20,
+	)
+	return s
+}()
+
+var importPKAdderBufferSize = func() *settings.ByteSizeSetting {
+	s := settings.RegisterByteSizeSetting(
+		"kv.bulk_ingest.pk_buffer_size",
+		"the initial size of the BulkAdder buffer handling primary index imports",
+		32<<20,
+	)
+	return s
+}()
+
+var importPKAdderMaxBufferSize = func() *settings.ByteSizeSetting {
+	s := settings.RegisterByteSizeSetting(
+		"kv.bulk_ingest.max_pk_buffer_size",
+		"the maximum size of the BulkAdder buffer handling primary index imports",
+		128<<20,
+	)
+	return s
+}()
+
+var importIndexAdderBufferSize = func() *settings.ByteSizeSetting {
+	s := settings.RegisterByteSizeSetting(
+		"kv.bulk_ingest.index_buffer_size",
+		"the initial size of the BulkAdder buffer handling secondary index imports",
+		32<<20,
+	)
+	return s
+}()
+
+var importIndexAdderMaxBufferSize = func() *settings.ByteSizeSetting {
+	s := settings.RegisterByteSizeSetting(
+		"kv.bulk_ingest.max_index_buffer_size",
+		"the maximum size of the BulkAdder buffer handling secondary index imports",
+		512<<20,
+	)
+	return s
+}()
+
+var importBufferIncrementSize = func() *settings.ByteSizeSetting {
+	s := settings.RegisterByteSizeSetting(
+		"kv.bulk_ingest.buffer_increment",
+		"the size by which the BulkAdder attempts to grow its buffer before flushing",
+		32<<20,
+	)
+	return s
+}()
+
+// commandMetadataEstimate is an estimate of how much metadata Raft will add to
+// an AddSSTable command. It is intentionally a vast overestimate to avoid
+// embedding intricate knowledge of the Raft encoding scheme here.
+const commandMetadataEstimate = 1 << 20 // 1 MB
+
+// MaxImportBatchSize determines the maximum size of the payload in an
+// AddSSTable request. It uses the ImportBatchSize setting directly unless the
+// specified value would exceed the maximum Raft command size, in which case it
+// returns the maximum batch size that will fit within a Raft command.
+func MaxImportBatchSize(st *cluster.Settings) int64 {
+	desiredSize := importBatchSize.Get(&st.SV)
+	maxCommandSize := kvserver.MaxCommandSize.Get(&st.SV)
+	if desiredSize+commandMetadataEstimate > maxCommandSize {
+		return maxCommandSize - commandMetadataEstimate
+	}
+	return desiredSize
+}
+
+// ImportBufferConfigSizes determines the minimum, maximum and step size for the
+// BulkAdder buffer used in import.
+func ImportBufferConfigSizes(st *cluster.Settings, isPKAdder bool) (int64, func() int64, int64) {
+	if isPKAdder {
+		return importPKAdderBufferSize.Get(&st.SV),
+			func() int64 { return importPKAdderMaxBufferSize.Get(&st.SV) },
+			importBufferIncrementSize.Get(&st.SV)
+	}
+	return importIndexAdderBufferSize.Get(&st.SV),
+		func() int64 { return importIndexAdderMaxBufferSize.Get(&st.SV) },
+		importBufferIncrementSize.Get(&st.SV)
+}
+
 // Progress is streamed to the coordinator through metadata.
 var restoreDataOutputTypes = []*types.T{}
 
@@ -45,13 +133,30 @@ type restoreDataProcessor struct {
 	output  execinfra.RowReceiver
 
 	alloc rowenc.DatumAlloc
-	kr    *storageccl.KeyRewriter
+	kr    *KeyRewriter
 }
 
 var _ execinfra.Processor = &restoreDataProcessor{}
 var _ execinfra.RowSource = &restoreDataProcessor{}
 
 const restoreDataProcName = "restoreDataProcessor"
+
+func newTestingRestoreDataProcessor(
+	ctx context.Context,
+	evalCtx *tree.EvalContext,
+	flowCtx *execinfra.FlowCtx,
+	spec execinfrapb.RestoreDataSpec,
+) (*restoreDataProcessor, error) {
+	rd := &restoreDataProcessor{
+		ProcessorBase: execinfra.ProcessorBase{
+			Ctx:     ctx,
+			EvalCtx: evalCtx,
+		},
+		flowCtx: flowCtx,
+		spec:    spec,
+	}
+	return rd, nil
+}
 
 func newRestoreDataProcessor(
 	flowCtx *execinfra.FlowCtx,
@@ -69,7 +174,7 @@ func newRestoreDataProcessor(
 	}
 
 	var err error
-	rd.kr, err = storageccl.MakeKeyRewriterFromRekeys(rd.spec.Rekeys)
+	rd.kr, err = MakeKeyRewriterFromRekeys(rd.spec.Rekeys)
 	if err != nil {
 		return nil, err
 	}
@@ -137,7 +242,7 @@ func (rd *restoreDataProcessor) Next() (rowenc.EncDatumRow, *execinfrapb.Produce
 	}
 
 	log.VEventf(rd.Ctx, 1 /* level */, "importing span %v", entry.Span)
-	summary, err := rd.processRestoreSpanEntry(entry, newSpanKey)
+	summary, err := rd.ProcessRestoreSpanEntry(entry, newSpanKey)
 	if err != nil {
 		rd.MoveToDraining(err)
 		return nil, rd.DrainHelper()
@@ -166,7 +271,7 @@ func init() {
 	rowexec.NewRestoreDataProcessor = newRestoreDataProcessor
 }
 
-func (rd *restoreDataProcessor) processRestoreSpanEntry(
+func (rd *restoreDataProcessor) ProcessRestoreSpanEntry(
 	entry execinfrapb.RestoreSpanEntry, newSpanKey roachpb.Key,
 ) (roachpb.BulkOpSummary, error) {
 	db := rd.flowCtx.Cfg.DB
@@ -176,7 +281,7 @@ func (rd *restoreDataProcessor) processRestoreSpanEntry(
 	// rekeys could be using table descriptors from either the old or new
 	// foreign key representation on the table descriptor, but this is fine
 	// because foreign keys don't matter for the key rewriter.
-	kr, err := storageccl.MakeKeyRewriterFromRekeys(rd.spec.Rekeys)
+	kr, err := MakeKeyRewriterFromRekeys(rd.spec.Rekeys)
 	if err != nil {
 		return summary, errors.Wrap(err, "make key rewriter")
 	}
@@ -240,7 +345,7 @@ func (rd *restoreDataProcessor) processRestoreSpanEntry(
 	}
 
 	batcher, err := bulk.MakeSSTBatcher(ctx, db, evalCtx.Settings,
-		func() int64 { return storageccl.MaxImportBatchSize(evalCtx.Settings) })
+		func() int64 { return MaxImportBatchSize(evalCtx.Settings) })
 	if err != nil {
 		return summary, err
 	}
