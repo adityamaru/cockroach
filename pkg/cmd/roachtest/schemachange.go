@@ -303,11 +303,13 @@ func makeIndexAddTpccTest(spec clusterSpec, warehouses int, length time.Duration
 				Warehouses: warehouses,
 				// We limit the number of workers because the default results in a lot
 				// of connections which can lead to OOM issues (see #40566).
-				ExtraRunArgs: fmt.Sprintf("--wait=false --tolerate-errors --workers=%d", warehouses),
+				ExtraRunArgs: fmt.Sprintf("--vmodule='backfill'=4,"+
+					"'indexbackfiller'=4 --wait=false --tolerate-errors --workers=%d",
+					warehouses),
 				During: func(ctx context.Context) error {
 					return runAndLogStmts(ctx, t, c, "addindex", []string{
-						`CREATE UNIQUE INDEX ON tpcc.order (o_entry_d, o_w_id, o_d_id, o_carrier_id, o_id);`,
-						`CREATE INDEX ON tpcc.order (o_carrier_id);`,
+						//`CREATE UNIQUE INDEX ON tpcc.order (o_entry_d, o_w_id, o_d_id, o_carrier_id, o_id);`,
+						//`CREATE INDEX ON tpcc.order (o_carrier_id);`,
 						`CREATE INDEX ON tpcc.customer (c_last, c_first);`,
 					})
 				},
