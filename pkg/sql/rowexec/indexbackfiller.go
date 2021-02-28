@@ -377,6 +377,7 @@ func (ib *indexBackfiller) Run(ctx context.Context) {
 		ib.output.Push(nil, &execinfrapb.ProducerMetadata{Err: err})
 		return
 	}
+	log.Info(ctx, "index backfiller has completed running")
 }
 
 func (ib *indexBackfiller) wrapDupError(ctx context.Context, orig error) error {
