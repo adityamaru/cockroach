@@ -81,7 +81,7 @@ const (
 	// behavior, and minimize test complexity. Should this be a cluster setting? I
 	// would hope we can do a dynamic memory based adjustment of this number in
 	// the processor.
-	indexBackfillBatchSize = 1000
+	indexBackfillBatchSize = 5000
 
 	// checkpointInterval is the interval after which a checkpoint of the
 	// schema change is posted.
