@@ -304,7 +304,7 @@ func (ib *indexBackfiller) runBackfill(
 	ctx context.Context, progCh chan execinfrapb.RemoteProducerMetadata_BulkProcessorProgress,
 ) error {
 	// Used to send index entries to the KV layer.
-	indexEntriesCh := make(chan indexEntryBatch, 10)
+	indexEntriesCh := make(chan indexEntryBatch, 5)
 
 	// This group holds the go routines that are responsible for producing index
 	// entries and ingesting the KVs into storage.
