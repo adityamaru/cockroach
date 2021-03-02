@@ -931,7 +931,6 @@ func (ib *IndexBackfiller) BuildIndexEntriesChunk(
 		// attempt to Grow() it while encoding secondary indexes.
 		var memUsedDuringEncoding int64
 		ib.muBoundAccount.Lock()
-		log.Infof(ctx, "encoding secondary indexes %d\n", memUsedPerChunk)
 		if buffer, memUsedDuringEncoding, err = rowenc.EncodeSecondaryIndexes(
 			ctx,
 			ib.evalCtx.Codec,
@@ -948,7 +947,6 @@ func (ib *IndexBackfiller) BuildIndexEntriesChunk(
 		}
 		ib.muBoundAccount.Unlock()
 		memUsedPerChunk += memUsedDuringEncoding
-		log.Infof(ctx, "finished encoding secondary indexes %d\n", memUsedPerChunk)
 
 		// The memory monitor has already accounted for cap(entries). If the number
 		// of index entries are going to cause the entries buffer to re-slice, then
@@ -962,7 +960,6 @@ func (ib *IndexBackfiller) BuildIndexEntriesChunk(
 			memUsedPerChunk += resliceSize
 		}
 
-		log.Infof(ctx, "Appending this buffer %+v\n", buffer)
 		entries = append(entries, buffer...)
 	}
 

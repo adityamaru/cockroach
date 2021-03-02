@@ -210,6 +210,7 @@ func (ib *indexBackfiller) ingestIndexEntries(
 	adder.SetOnFlush(func() {
 		mu.Lock()
 		defer mu.Unlock()
+		log.Infof(ctx, "flushing the adder with spans: %+v", mu.addedSpans)
 		mu.completedSpans = append(mu.completedSpans, mu.addedSpans...)
 		mu.addedSpans = nil
 	})
@@ -221,6 +222,7 @@ func (ib *indexBackfiller) ingestIndexEntries(
 		mu.completedSpans = nil
 		mu.Unlock()
 
+		log.Info(ctx, "pushing progress from the indexbackfiller")
 		progCh <- prog
 	}
 
@@ -246,7 +248,10 @@ func (ib *indexBackfiller) ingestIndexEntries(
 	g.GoCtx(func(ctx context.Context) error {
 		defer close(stopProgress)
 
+		var batchCount int
 		for indexBatch := range indexEntryCh {
+			log.Infof(ctx, "processing batch %d", batchCount)
+			batchCount++
 			for _, indexEntry := range indexBatch.indexEntries {
 				if err := ib.adder.Add(ctx, indexEntry.Key, indexEntry.Value.RawBytes); err != nil {
 					return ib.wrapDupError(ctx, err)
@@ -377,7 +382,6 @@ func (ib *indexBackfiller) Run(ctx context.Context) {
 		ib.output.Push(nil, &execinfrapb.ProducerMetadata{Err: err})
 		return
 	}
-	log.Info(ctx, "index backfiller has completed running")
 }
 
 func (ib *indexBackfiller) wrapDupError(ctx context.Context, orig error) error {
@@ -437,7 +441,7 @@ func (ib *indexBackfiller) buildIndexEntryBatch(
 		return nil, nil, 0, err
 	}
 	prepTime := timeutil.Now().Sub(start)
-	log.VEventf(ctx, 3, "index backfill stats: entries %d, prepare %+v",
+	log.VEventf(ctx, 3, "index backfill per batch stats: entries %d, prepare %+v",
 		len(entries), prepTime)
 
 	return key, entries, memUsedBuildingBatch, nil
