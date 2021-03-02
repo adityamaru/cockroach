@@ -444,6 +444,8 @@ type IndexBackfiller struct {
 	// backfilled.
 	indexesToEncode []*descpb.IndexDescriptor
 
+	valNeededForCol util.FastIntSet
+
 	// mon is a memory monitor linked with the IndexBackfiller on creation.
 	mon            *mon.BytesMonitor
 	muBoundAccount muBoundAccount
@@ -487,6 +489,7 @@ func (ib *IndexBackfiller) InitForLocalUse(
 	referencedColumns.ForEach(func(col descpb.ColumnID) {
 		valNeededForCol.Add(ib.colIdxMap.GetDefault(col))
 	})
+	ib.valNeededForCol = valNeededForCol
 
 	return ib.init(evalCtx, predicates, colExprs, valNeededForCol, desc, mon)
 }
@@ -632,6 +635,7 @@ func (ib *IndexBackfiller) InitForDistributedUse(
 	referencedColumns.ForEach(func(col descpb.ColumnID) {
 		valNeededForCol.Add(ib.colIdxMap.GetDefault(col))
 	})
+	ib.valNeededForCol = valNeededForCol
 
 	return ib.init(evalCtx, predicates, colExprs, valNeededForCol, desc, mon)
 }
@@ -750,32 +754,13 @@ func (ib *IndexBackfiller) init(
 		ib.types[i] = ib.cols[i].Type
 	}
 
-	tableArgs := row.FetcherTableArgs{
-		Desc:            desc,
-		Index:           desc.GetPrimaryIndex().IndexDesc(),
-		ColIdxMap:       ib.colIdxMap,
-		Cols:            ib.cols,
-		ValNeededForCol: valNeededForCol,
-	}
-
 	// Create a bound account associated with the index backfiller monitor.
 	if mon == nil {
 		return errors.AssertionFailedf("no memory monitor linked to IndexBackfiller during init")
 	}
 	ib.mon = mon
 	ib.muBoundAccount.boundAccount = mon.MakeBoundAccount()
-
-	return ib.fetcher.Init(
-		evalCtx.Context,
-		evalCtx.Codec,
-		false, /* reverse */
-		descpb.ScanLockingStrength_FOR_NONE,
-		descpb.ScanLockingWaitPolicy_BLOCK,
-		false, /* isCheck */
-		&ib.alloc,
-		mon,
-		tableArgs,
-	)
+	return nil
 }
 
 // BuildIndexEntriesChunk reads a chunk of rows from a table using the span sp
@@ -816,6 +801,28 @@ func (ib *IndexBackfiller) BuildIndexEntriesChunk(
 	// during the scan. Index entries in the new index are being
 	// populated and deleted by the OLTP commands but not otherwise
 	// read or used
+	tableArgs := row.FetcherTableArgs{
+		Desc:            tableDesc,
+		Index:           tableDesc.GetPrimaryIndex().IndexDesc(),
+		ColIdxMap:       ib.colIdxMap,
+		Cols:            ib.cols,
+		ValNeededForCol: ib.valNeededForCol,
+	}
+	err := ib.fetcher.Init(
+		ib.evalCtx.Context,
+		ib.evalCtx.Codec,
+		false, /* reverse */
+		descpb.ScanLockingStrength_FOR_NONE,
+		descpb.ScanLockingWaitPolicy_BLOCK,
+		false, /* isCheck */
+		&ib.alloc,
+		ib.mon,
+		tableArgs,
+	)
+	if err != nil {
+		return nil, nil, 0, err
+	}
+	defer ib.fetcher.Close(ctx)
 	if err := ib.fetcher.StartScan(
 		ctx, txn, []roachpb.Span{sp}, true /* limitBatches */, initBufferSize,
 		traceKV, false, /* forceProductionKVBatchSize */
@@ -966,7 +973,12 @@ func (ib *IndexBackfiller) BuildIndexEntriesChunk(
 	memUsedPerChunk -= shrinkSize
 
 	log.Infof(ctx, "final mem used by chunk %d\n", memUsedPerChunk)
-	return entries, ib.fetcher.Key(), memUsedPerChunk, nil
+	var retKey roachpb.Key
+	if ib.fetcher.Key() != nil {
+		retKey = make(roachpb.Key, len(ib.fetcher.Key()))
+		copy(retKey, ib.fetcher.Key())
+	}
+	return entries, retKey, memUsedPerChunk, nil
 }
 
 // RunIndexBackfillChunk runs an index backfill over a chunk of the table
