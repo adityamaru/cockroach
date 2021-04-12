@@ -40,8 +40,8 @@ type mockScatterer struct {
 
 // This mock implementation of the split and scatterer simulates a scattering of
 // ranges.
-func (s *mockScatterer) splitAndScatterKey(
-	_ context.Context, _ keys.SQLCodec, _ *kv.DB, _ *storageccl.KeyRewriter, _ roachpb.Key, _ bool,
+func (s *mockScatterer) splitAndScatter(
+	_ context.Context, _ keys.SQLCodec, _ *kv.DB, _ *storageccl.KeyRewriter, _, _ roachpb.Key, _ bool,
 ) (roachpb.NodeID, error) {
 	s.Lock()
 	defer s.Unlock()
