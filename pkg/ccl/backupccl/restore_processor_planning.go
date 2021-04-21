@@ -11,6 +11,7 @@ package backupccl
 import (
 	"bytes"
 	"context"
+	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"sort"
 
 	"github.com/cockroachdb/cockroach/pkg/jobs/jobspb"
@@ -84,6 +85,12 @@ func distRestore(
 	splitAndScatterSpecs, err := makeSplitAndScatterSpecs(nodes, chunks, rekeys)
 	if err != nil {
 		return err
+	}
+
+	// Print a summary of how many chunks are allocated on what node.
+	for nodeID, spec := range splitAndScatterSpecs {
+		log.Infof(ctx, "%s: node %d has been allocated chunks %d", restorePerfInvestigation, nodeID,
+			len(spec.Chunks))
 	}
 
 	restoreDataSpec := execinfrapb.RestoreDataSpec{

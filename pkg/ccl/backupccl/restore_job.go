@@ -64,6 +64,8 @@ type intervalSpan roachpb.Span
 
 var _ interval.Interface = intervalSpan{}
 
+const restorePerfInvestigation = "restore-perf-investigation"
+
 // ID is part of `interval.Interface` but unused in makeImportSpans.
 func (ie intervalSpan) ID() uintptr { return 0 }
 
@@ -665,6 +667,7 @@ func restore(
 	// a constant and grew slower than linear with the length of importSpans. It
 	// seems to be working well for BenchmarkRestore2TB but worth revisiting.
 	chunkSize := int(math.Sqrt(float64(len(importSpans))))
+	log.Infof(restoreCtx, "%s: chunk size %d", restorePerfInvestigation, chunkSize)
 	importSpanChunks := make([][]execinfrapb.RestoreSpanEntry, 0, len(importSpans)/chunkSize)
 	for start := 0; start < len(importSpans); {
 		importSpanChunk := importSpans[start:]
@@ -675,6 +678,7 @@ func restore(
 		importSpanChunks = append(importSpanChunks, importSpanChunk)
 		start = end
 	}
+	log.Infof(restoreCtx, "%s: number of chunks %d", restorePerfInvestigation, len(importSpanChunks))
 
 	requestFinishedCh := make(chan struct{}, len(importSpans)) // enough buffer to never block
 	g.GoCtx(func(ctx context.Context) error {
