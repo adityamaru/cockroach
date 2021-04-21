@@ -598,10 +598,31 @@ func (db *DB) SplitAndScatter(
 		RequestHeader:   roachpb.RequestHeaderFromSpan(roachpb.Span{Key: key, EndKey: key.Next()}),
 		RandomizeLeases: true,
 	}
-	if _, pErr := SendWrapped(ctx, db.NonTransactionalSender(), scatterReq); pErr != nil {
+	var resp roachpb.Response
+	var pErr *roachpb.Error
+	if resp, pErr = SendWrapped(ctx, db.NonTransactionalSender(), scatterReq); pErr != nil {
 		return pErr.GoError()
 	}
+	log.Infof(ctx, "restore-perf-investigation: split and scatter from sst batcher on key"+
+		" %s resulted in %d",
+		roachpb.Span{key, key.Next()}.String(),
+		findDestination(resp.(*roachpb.AdminScatterResponse)))
 	return nil
+}
+
+func findDestination(res *roachpb.AdminScatterResponse) roachpb.NodeID {
+	// A request from a 20.1 node will not have a RangeInfos with a lease.
+	// For this mixed-version state, we'll report the destination as node 0
+	// and suffer a bit of inefficiency.
+	if len(res.RangeInfos) > 0 {
+		// If the lease is not populated, we return the 0 value anyway. We receive 1
+		// RangeInfo per range that was scattered. Since we send a scatter request
+		// to each range that we make, we are only interested in the first range,
+		// which contains the key at which we're splitting and scattering.
+		return res.RangeInfos[0].Lease.Replica.NodeID
+	}
+
+	return roachpb.NodeID(0)
 }
 
 // AdminUnsplit removes the sticky bit of the range specified by splitKey.

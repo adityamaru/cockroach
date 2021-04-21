@@ -55,6 +55,8 @@ func (s *Store) Send(
 	// Limit the number of concurrent AddSSTable requests, since they're expensive
 	// and block all other writes to the same span.
 	if ba.IsSingleAddSSTableRequest() {
+		log.Infof(ctx, "restore-perf-investigation: %s got req from %d with destination %d",
+			s.Ident.String(), ba.GatewayNodeID, ba.Replica.NodeID)
 		before := timeutil.Now()
 		if err := s.limiters.ConcurrentAddSSTableRequests.Begin(ctx); err != nil {
 			return nil, roachpb.NewError(err)

@@ -269,7 +269,7 @@ func (b *SSTBatcher) doFlush(ctx context.Context, reason int, nextKey roachpb.Ke
 
 	size := b.sstWriter.DataSize
 	if reason == sizeFlush {
-		log.VEventf(ctx, 3, "flushing %s SST due to size > %s", sz(size), sz(b.maxSize()))
+		log.VEventf(ctx, 2, "flushing %s SST due to size > %s", sz(size), sz(b.maxSize()))
 		b.flushCounts.sstSize++
 
 		// On first flush, if it is due to size, we introduce one split at the start
@@ -284,6 +284,7 @@ func (b *SSTBatcher) doFlush(ctx context.Context, reason int, nextKey roachpb.Ke
 				// NB: Passing 'hour' here is technically illegal until 19.2 is
 				// active, but the value will be ignored before that, and we don't
 				// have access to the cluster version here.
+				log.Infof(ctx, "restore-perf-investigation: issuing split and scatter from sst batcher")
 				if err := b.db.SplitAndScatter(ctx, splitAt, hour); err != nil {
 					log.Warningf(ctx, "%v", err)
 				}

@@ -322,7 +322,8 @@ func registerRestore(r *testRegistry) {
 				// Randomize starting with encryption-at-rest enabled.
 				c.encryptAtRandom = true
 				c.Put(ctx, cockroach, "./cockroach")
-				c.Start(ctx, t)
+				args := startArgs("--args='--vmodule=split_and_scatter_processor=2'")
+				c.Start(ctx, t, args)
 				m := newMonitor(ctx, c)
 
 				// Run the disk usage logger in the monitor to guarantee its

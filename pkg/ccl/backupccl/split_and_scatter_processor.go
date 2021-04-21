@@ -108,6 +108,9 @@ func (s dbSplitAndScatterer) splitAndScatter(
 			newScatterKey, newScatterKey.Next(), pErr.GoError())
 		return 0, nil
 	}
+	log.Infof(ctx, "%s: span %s was scattered to destination %d", restorePerfInvestigation,
+		roachpb.Span{newScatterKey,
+		newScatterKey.Next()}.String(), s.findDestination(res.(*roachpb.AdminScatterResponse)))
 
 	return s.findDestination(res.(*roachpb.AdminScatterResponse)), nil
 }
@@ -309,11 +312,14 @@ func (ssp *splitAndScatterProcessor) runSplitAndScatter(
 				// prefix of the space to scatter.
 				splitKey = spec.Chunks[i+1].Entries[0].Span.Key
 			}
+			log.Infof(ctx, "%s: issuing split and scatter for a chunk", restorePerfInvestigation)
 			chunkDestination, err := scatterer.splitAndScatter(ctx, flowCtx.Codec(), db, kr,
 				splitKey, scatterKey, true /* randomizeLeases */)
 			if err != nil {
 				return err
 			}
+			log.Infof(ctx, "%s: post split and scatter for a chunk - destination %d",
+				restorePerfInvestigation, chunkDestination)
 
 			sc := scatteredChunk{
 				destination: chunkDestination,
@@ -358,11 +364,15 @@ func (ssp *splitAndScatterProcessor) runSplitAndScatter(
 						if i >= len(importSpanChunk.entries)-nextChunkIdx {
 							var err error
 							// TODO: Benchmark randomizing these leases too.
+							log.Infof(ctx, "%s: issuing a split and scatter on a subchunk %d",
+								restorePerfInvestigation, chunkDestination)
 							destination, err = scatterer.splitAndScatter(ctx, flowCtx.Codec(), db, kr,
 								splitKey, scatterKey, false /* randomizeLeases */)
 							if err != nil {
 								return err
 							}
+							log.Infof(ctx, "%s: post split and scatter on a subchunk %d",
+								restorePerfInvestigation, destination)
 						} else {
 							destination = chunkDestination
 						}
