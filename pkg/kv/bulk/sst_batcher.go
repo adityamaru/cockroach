@@ -51,11 +51,18 @@ func (b sz) String() string {
 // it to attempt to flush SSTs before they cross range boundaries to minimize
 // expensive on-split retries.
 type SSTBatcher struct {
-	db         SSTSender
-	rc         *rangecache.RangeCache
-	settings   *cluster.Settings
-	maxSize    func() int64
-	splitAfter func() int64
+	db       SSTSender
+	rc       *rangecache.RangeCache
+	settings *cluster.Settings
+	maxSize  func() int64
+	// This should be set only if the sst batcher is flushed explicitly by the
+	// user at a reasonable cadence to avoid OOMs.
+	// A side effect of setting this to true is that spans are not split and
+	// scattered. This is important for restore where the spans have already been
+	// split and scattered and therefore it could be detrimental to reposition
+	// them.
+	ignoreMaxSizeWhenFlushing bool
+	splitAfter                func() int64
 
 	// allows ingestion of keys where the MVCC.Key would shadow an existing row.
 	disallowShadowing bool
@@ -110,9 +117,14 @@ type SSTBatcher struct {
 
 // MakeSSTBatcher makes a ready-to-use SSTBatcher.
 func MakeSSTBatcher(
-	ctx context.Context, db SSTSender, settings *cluster.Settings, flushBytes func() int64,
+	ctx context.Context,
+	db SSTSender,
+	settings *cluster.Settings,
+	flushBytes func() int64,
+	ignoreMaxSizeWhenFlushing bool,
 ) (*SSTBatcher, error) {
-	b := &SSTBatcher{db: db, settings: settings, maxSize: flushBytes, disallowShadowing: true}
+	b := &SSTBatcher{db: db, settings: settings, maxSize: flushBytes, disallowShadowing: true,
+		ignoreMaxSizeWhenFlushing: ignoreMaxSizeWhenFlushing}
 	err := b.Reset(ctx)
 	return b, err
 }
@@ -240,7 +252,7 @@ func (b *SSTBatcher) flushIfNeeded(ctx context.Context, nextKey roachpb.Key) err
 		return b.Reset(ctx)
 	}
 
-	if b.sstWriter.DataSize >= b.maxSize() {
+	if b.sstWriter.DataSize >= b.maxSize() && !b.ignoreMaxSizeWhenFlushing {
 		if err := b.doFlush(ctx, sizeFlush, nextKey); err != nil {
 			return err
 		}

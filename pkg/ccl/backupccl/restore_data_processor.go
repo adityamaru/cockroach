@@ -189,7 +189,8 @@ func (rd *restoreDataProcessor) processRestoreSpanEntry(
 	}
 
 	batcher, err := bulk.MakeSSTBatcher(ctx, db, evalCtx.Settings,
-		func() int64 { return storageccl.MaxImportBatchSize(evalCtx.Settings) })
+		func() int64 { return storageccl.MaxImportBatchSize(evalCtx.Settings) },
+		true /* ignoreMaxSizeWhenFlushing */)
 	if err != nil {
 		return summary, err
 	}
