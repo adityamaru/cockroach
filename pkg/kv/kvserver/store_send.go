@@ -54,6 +54,8 @@ func (s *Store) Send(
 
 	// Limit the number of concurrent AddSSTable requests, since they're expensive
 	// and block all other writes to the same span.
+	var preSendWait time.Duration
+	isSST := false
 	if ba.IsSingleAddSSTableRequest() {
 		log.Infof(ctx, "restore-perf-investigation: %s got req from %d with destination %d",
 			s.Ident.String(), ba.GatewayNodeID, ba.Replica.NodeID)
@@ -74,6 +76,8 @@ func (s *Store) Send(
 			log.Infof(ctx, "SST ingestion was delayed by %v (%v for storage engine back-pressure)",
 				waited, waitedEngine)
 		}
+		isSST = true
+		preSendWait = waited
 	}
 
 	if err := ba.SetActiveTimestamp(s.Clock().Now); err != nil {
@@ -196,6 +200,9 @@ func (s *Store) Send(
 
 	br, pErr = repl.Send(ctx, ba)
 	if pErr == nil {
+		if isSST {
+			br.Responses[0].GetAddSstable().Prewait = preSendWait
+		}
 		return br, nil
 	}
 

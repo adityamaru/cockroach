@@ -44,6 +44,13 @@ func (b sz) String() string {
 	return humanizeutil.IBytes(int64(b))
 }
 
+type SentSST struct {
+	nodeID        roachpb.NodeID
+	remotePrewait time.Duration
+	wait          time.Duration
+	sstSize       int
+}
+
 // SSTBatcher is a helper for bulk-adding many KVs in chunks via AddSSTable. An
 // SSTBatcher can be handed KVs repeatedly and will make them into SSTs that are
 // added when they reach the configured size, tracking the total added rows,
@@ -95,6 +102,10 @@ type SSTBatcher struct {
 
 		sendWait  time.Duration
 		splitWait time.Duration
+
+		failedDueToSplitTime time.Duration
+		failedSendTime       time.Duration
+		recipients           map[roachpb.NodeID]SentSST
 	}
 	// Tracking for if we have "filled" a range in case we want to split/scatter.
 	flushedToCurrentRange int64
@@ -216,6 +227,9 @@ func (b *SSTBatcher) Reset(ctx context.Context) error {
 	b.ms.Reset()
 
 	b.rowCounter.BulkOpSummary.Reset()
+	if b.flushCounts.recipients == nil {
+		b.flushCounts.recipients = make(map[roachpb.NodeID]SentSST)
+	}
 	return nil
 }
 
@@ -319,18 +333,27 @@ func (b *SSTBatcher) doFlush(ctx context.Context, reason int, nextKey roachpb.Ke
 	}
 
 	beforeSend := timeutil.Now()
-	files, err := AddSSTable(ctx, b.db, start, end, b.sstFile.Data(), b.disallowShadowing, b.ms, b.settings)
+	timing, err := AddSSTable(ctx, b.db, start, end, b.sstFile.Data(), b.disallowShadowing, b.ms, b.settings)
 	if err != nil {
 		return err
 	}
+	b.flushCounts.failedSendTime += timing.FailedSendTime
+	b.flushCounts.failedDueToSplitTime += timing.FailedDueToSplitTime
 	b.flushCounts.sendWait += timeutil.Since(beforeSend)
 
-	b.flushCounts.files += files
+	for _, f := range timing.Files {
+		sum := b.flushCounts.recipients[f.nodeID]
+		sum.sstSize += f.sstSize
+		sum.remotePrewait += f.remotePrewait
+		sum.wait += f.wait
+		b.flushCounts.recipients[f.nodeID] = sum
+	}
+	b.flushCounts.files += len(timing.Files)
 	if b.flushKey != nil {
 		// If the flush-before key hasn't changed we know we don't think we passed
 		// a range boundary, and if the files-added count is 1 we didn't hit an
 		// unexpected split either, so assume we added to the same range.
-		if reason == sizeFlush && bytes.Equal(b.flushKey, b.lastFlushKey) && files == 1 {
+		if reason == sizeFlush && bytes.Equal(b.flushKey, b.lastFlushKey) && len(timing.Files) == 1 {
 			b.flushedToCurrentRange += size
 		} else {
 			// Assume we started adding to new different range with this SST.
@@ -377,7 +400,7 @@ func (b *SSTBatcher) GetSummary() roachpb.BulkOpSummary {
 type SSTSender interface {
 	AddSSTable(
 		ctx context.Context, begin, end interface{}, data []byte, disallowShadowing bool, stats *enginepb.MVCCStats, ingestAsWrites bool,
-	) error
+	) (*roachpb.AddSSTableResponse, error)
 	SplitAndScatter(ctx context.Context, key roachpb.Key, expirationTime hlc.Timestamp) error
 }
 
@@ -386,6 +409,12 @@ type sstSpan struct {
 	sstBytes          []byte
 	disallowShadowing bool
 	stats             enginepb.MVCCStats
+}
+
+type AddSSTableTimings struct {
+	Files                []SentSST
+	FailedSendTime       time.Duration
+	FailedDueToSplitTime time.Duration
 }
 
 // AddSSTable retries db.AddSSTable if retryable errors occur, including if the
@@ -399,12 +428,11 @@ func AddSSTable(
 	disallowShadowing bool,
 	ms enginepb.MVCCStats,
 	settings *cluster.Settings,
-) (int, error) {
-	var files int
+) (AddSSTableTimings, error) {
 	now := timeutil.Now()
 	iter, err := storage.NewMemSSTIterator(sstBytes, true)
 	if err != nil {
-		return 0, err
+		return AddSSTableTimings{}, err
 	}
 	defer iter.Close()
 
@@ -412,22 +440,27 @@ func AddSSTable(
 	if (ms == enginepb.MVCCStats{}) {
 		stats, err = storage.ComputeStatsForRange(iter, start, end, now.UnixNano())
 		if err != nil {
-			return 0, errors.Wrapf(err, "computing stats for SST [%s, %s)", start, end)
+			return AddSSTableTimings{}, errors.Wrapf(err, "computing stats for SST [%s, %s)", start, end)
 		}
 	} else {
 		stats = ms
 	}
+
+	var timings AddSSTableTimings
+	timings.Files = make([]SentSST, 0, 1)
 
 	work := []*sstSpan{{start: start, end: end, sstBytes: sstBytes, disallowShadowing: disallowShadowing, stats: stats}}
 	const maxAddSSTableRetries = 10
 	for len(work) > 0 {
 		item := work[0]
 		work = work[1:]
-		if err := func() error {
+		beforeSend := timeutil.Now()
+
+		res, err := func() (*roachpb.AddSSTableResponse, error) {
 			var err error
 			for i := 0; i < maxAddSSTableRetries; i++ {
 				log.VEventf(ctx, 2, "sending %s AddSSTable [%s,%s)", sz(len(item.sstBytes)), item.start, item.end)
-				before := timeutil.Now()
+				beforeAttempt := timeutil.Now()
 				// If this SST is "too small", the fixed costs associated with adding an
 				// SST – in terms of triggering flushes, extra compactions, etc – would
 				// exceed the savings we get from skipping regular, key-by-key writes,
@@ -444,34 +477,37 @@ func AddSSTable(
 					ingestAsWriteBatch = true
 				}
 				// This will fail if the range has split but we'll check for that below.
-				err = db.AddSSTable(ctx, item.start, item.end, item.sstBytes, item.disallowShadowing, &item.stats, ingestAsWriteBatch)
+				res, err := db.AddSSTable(ctx, item.start, item.end, item.sstBytes, item.disallowShadowing, &item.stats, ingestAsWriteBatch)
+				afterAttempt := timeutil.Now()
 				if err == nil {
-					log.VEventf(ctx, 3, "adding %s AddSSTable [%s,%s) took %v", sz(len(item.sstBytes)), item.start, item.end, timeutil.Since(before))
-					return nil
+					log.VEventf(ctx, 3, "adding %s AddSSTable [%s,%s) took %v", sz(len(item.sstBytes)), item.start, item.end, afterAttempt.Sub(beforeAttempt))
+					return res, nil
 				}
+				timings.FailedSendTime += afterAttempt.Sub(beforeAttempt)
 				// This range has split -- we need to split the SST to try again.
 				if m := (*roachpb.RangeKeyMismatchError)(nil); errors.As(err, &m) {
+					timings.FailedDueToSplitTime += afterAttempt.Sub(beforeAttempt)
 					// TODO(andrei): We just use the first of m.Ranges; presumably we
 					// should be using all of them to avoid further retries.
 					split := m.Ranges()[0].Desc.EndKey.AsRawKey()
 					log.Infof(ctx, "SSTable cannot be added spanning range bounds %v, retrying...", split)
 					left, right, err := createSplitSSTable(ctx, db, item.start, split, item.disallowShadowing, iter, settings)
 					if err != nil {
-						return err
+						return nil, err
 					}
 
 					right.stats, err = storage.ComputeStatsForRange(
 						iter, right.start, right.end, now.UnixNano(),
 					)
 					if err != nil {
-						return err
+						return nil, err
 					}
 					left.stats = item.stats
 					left.stats.Subtract(right.stats)
 
 					// Add more work.
 					work = append([]*sstSpan{left, right}, work...)
-					return nil
+					return nil, nil
 				}
 				// Retry on AmbiguousResult.
 				if errors.HasType(err, (*roachpb.AmbiguousResultError)(nil)) {
@@ -479,17 +515,18 @@ func AddSSTable(
 					continue
 				}
 			}
-			return errors.Wrapf(err, "addsstable [%s,%s)", item.start, item.end)
-		}(); err != nil {
-			return files, err
+			return nil, errors.Wrapf(err, "addsstable [%s,%s)", item.start, item.end)
+		}()
+		if err != nil {
+			return AddSSTableTimings{}, err
 		}
-		files++
+		timings.Files = append(timings.Files, SentSST{nodeID: res.NodeID, remotePrewait: res.Prewait, wait: timeutil.Since(beforeSend), sstSize: len(item.sstBytes)})
 		// explicitly deallocate SST. This will not deallocate the
 		// top level SST which is kept around to iterate over.
 		item.sstBytes = nil
 	}
-	log.VEventf(ctx, 3, "AddSSTable [%v, %v) added %d files and took %v", start, end, files, timeutil.Since(now))
-	return files, nil
+	log.VEventf(ctx, 3, "AddSSTable [%v, %v) added %d files and took %v", start, end, len(timings.Files), timeutil.Since(now))
+	return timings, nil
 }
 
 // createSplitSSTable is a helper for splitting up SSTs. The iterator
