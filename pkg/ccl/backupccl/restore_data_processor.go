@@ -35,7 +35,7 @@ import (
 var restoreDataOutputTypes = []*types.T{}
 
 // logTimingsEvery is the number of entries that we process before logging timing metrics.
-const logTimingsEvery = 500
+const logTimingsEvery = 50
 
 type restoreDataProcessor struct {
 	execinfra.ProcessorBase
@@ -106,8 +106,13 @@ func (rd *restoreDataProcessor) Start(ctx context.Context) {
 	evalCtx := rd.FlowCtx.EvalCtx
 	db := rd.FlowCtx.Cfg.DB
 	var err error
-	rd.batcher, err = bulk.MakeStreamSSTBatcher(ctx, db, evalCtx.Settings,
-		func() int64 { return storageccl.MaxImportBatchSize(evalCtx.Settings) })
+	nodeID, ok := rd.flowCtx.NodeID.OptionalNodeID()
+	if !ok {
+		log.Infof(ctx, "%s: failed to find the node ID", restorePerfInvestigation)
+	}
+	rd.batcher, err = bulk.MakeSSTBatcher(ctx, db, evalCtx.Settings,
+		func() int64 { return storageccl.MaxImportBatchSize(evalCtx.Settings) },
+		true, nodeID)
 	if err != nil {
 		rd.MoveToDraining(errors.Wrap(err, "creating sst batcher"))
 		return
@@ -312,6 +317,10 @@ func (rd *restoreDataProcessor) processRestoreSpanEntry(
 	timeFlushing := timeutil.Since(beforeFlush)
 	rd.timing.totalFlushing += timeFlushing
 
+	isLocal := func(nodeID roachpb.NodeID) bool {
+		return nodeID == rd.batcher.NodeID()
+	}
+
 	batchSummary := rd.batcher.GetBatchSummary()
 	if rd.shouldLogProgress() {
 		log.Infof(ctx, "processor running for %v", timeutil.Since(rd.timing.startTime))
@@ -321,6 +330,30 @@ func (rd *restoreDataProcessor) processRestoreSpanEntry(
 			timeOpeningIters, timeProducing, timeFlushing)
 		log.Infof(ctx, "processor spent %v time opening iterators, %v producing SSTs, and %v flushing",
 			rd.timing.totalIterators, rd.timing.totalProducing, rd.timing.totalFlushing)
+
+		flushCount := rd.batcher.FlushCounts()
+		var localTimeToProcessAddSST, remoteTimeToProcessAddSST time.Duration
+		var localPreWaitTime, remotePreWaitTime time.Duration
+		for node, sentSST := range flushCount.Recipients {
+			if isLocal(node) {
+				localTimeToProcessAddSST += sentSST.Wait
+				localPreWaitTime += sentSST.RemotePrewait
+			} else {
+				remoteTimeToProcessAddSST += sentSST.Wait
+				remotePreWaitTime += sentSST.RemotePrewait
+			}
+		}
+		log.Infof(ctx, "%s: %d entries took %s ("+
+			"rate: %d ms/entry) to process remote AddSSTable and %s (rate: %d ms/entry) to process local"+
+			" AddSSTable", restorePerfInvestigation, rd.timing.entryCount,
+			remoteTimeToProcessAddSST.String(),
+			remoteTimeToProcessAddSST.Milliseconds()/int64(rd.timing.entryCount),
+			localTimeToProcessAddSST.String(),
+			localTimeToProcessAddSST.Milliseconds()/int64(rd.timing.entryCount))
+
+		log.Infof(ctx, "%s: %d entries took %s to prewait remote AddSSTable and %s to"+
+			" prewait local AddSSTable", restorePerfInvestigation, rd.timing.entryCount,
+			remotePreWaitTime.String(), localPreWaitTime.String())
 	}
 
 	if restoreKnobs, ok := rd.flowCtx.TestingKnobs().BackupRestoreTestingKnobs.(*sql.BackupRestoreTestingKnobs); ok {
@@ -333,5 +366,5 @@ func (rd *restoreDataProcessor) processRestoreSpanEntry(
 }
 
 func (rd *restoreDataProcessor) shouldLogProgress() bool {
-	return log.V(4) || (log.V(3) && rd.timing.entryCount%logTimingsEvery == 0)
+	return rd.timing.entryCount%logTimingsEvery == 0
 }

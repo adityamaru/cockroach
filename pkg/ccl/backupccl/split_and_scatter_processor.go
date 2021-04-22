@@ -108,9 +108,9 @@ func (s dbSplitAndScatterer) splitAndScatter(
 			newScatterKey, newScatterKey.Next(), pErr.GoError())
 		return 0, nil
 	}
-	log.Infof(ctx, "%s: span %s was scattered to destination %d", restorePerfInvestigation,
-		roachpb.Span{newScatterKey,
-		newScatterKey.Next()}.String(), s.findDestination(res.(*roachpb.AdminScatterResponse)))
+	//log.Infof(ctx, "%s: span %s was scattered to destination %d", restorePerfInvestigation,
+	//	roachpb.Span{newScatterKey,
+	//		newScatterKey.Next()}.String(), s.findDestination(res.(*roachpb.AdminScatterResponse)))
 
 	return s.findDestination(res.(*roachpb.AdminScatterResponse)), nil
 }
@@ -338,51 +338,26 @@ func (ssp *splitAndScatterProcessor) runSplitAndScatter(
 	// TODO(pbardea): This tries to cover for a bad scatter by having 2 * the
 	// number of nodes in the cluster. Is it necessary?
 	splitScatterWorkers := 2
-	subChunkSize := 10 // TODO: Benchmark to refine this knob.
 	for worker := 0; worker < splitScatterWorkers; worker++ {
 		g.GoCtx(func(ctx context.Context) error {
 			for importSpanChunk := range importSpanChunksCh {
-				chunkDestination := importSpanChunk.destination
-				var lastDest roachpb.NodeID
-				for i, importEntry := range importSpanChunk.entries {
-					nextChunkIdx := i + subChunkSize
-
-					// By default, assume that this entry is going to the same
-					// node as the last one.
-					destination := lastDest
-					if i%subChunkSize == 0 {
-						log.VInfof(ctx, 2, "processing a span [%s,%s)", importEntry.Span.Key, importEntry.Span.EndKey)
-						scatterKey := importEntry.Span.Key
-						var splitKey roachpb.Key
-						if nextChunkIdx < len(importSpanChunk.entries)-1 {
-							// Split at the next entry.
-							splitKey = importSpanChunk.entries[nextChunkIdx].Span.Key
-						}
-
-						// If the next chunk is the last chunk we're going to
-						// scatter, don't scatter it.
-						if i >= len(importSpanChunk.entries)-nextChunkIdx {
-							var err error
-							// TODO: Benchmark randomizing these leases too.
-							log.Infof(ctx, "%s: issuing a split and scatter on a subchunk %d",
-								restorePerfInvestigation, chunkDestination)
-							destination, err = scatterer.splitAndScatter(ctx, flowCtx.Codec(), db, kr,
-								splitKey, scatterKey, false /* randomizeLeases */)
-							if err != nil {
-								return err
-							}
-							log.Infof(ctx, "%s: post split and scatter on a subchunk %d",
-								restorePerfInvestigation, destination)
-						} else {
-							destination = chunkDestination
-						}
+				log.Infof(ctx, "processing a chunk")
+				for i, importSpan := range importSpanChunk.entries {
+					log.Infof(ctx, "processing a span [%s,%s)", importSpan.Span.Key, importSpan.Span.EndKey)
+					var splitKey roachpb.Key
+					if i < len(importSpanChunk.entries)-1 {
+						splitKey = importSpanChunk.entries[i+1].Span.Key
+					}
+					destination, err := scatterer.splitAndScatter(ctx, flowCtx.Codec(), db, kr,
+						splitKey, importSpan.Span.Key, false /* randomizeLeases */)
+					if err != nil {
+						return err
 					}
 
 					scatteredEntry := entryNode{
-						entry: importEntry,
+						entry: importSpan,
 						node:  destination,
 					}
-					lastDest = destination
 
 					select {
 					case <-ctx.Done():

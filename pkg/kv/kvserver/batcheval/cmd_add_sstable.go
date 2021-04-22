@@ -41,6 +41,8 @@ func EvalAddSSTable(
 	ms := cArgs.Stats
 	reply := resp.(*roachpb.AddSSTableResponse)
 	reply.NodeID = cArgs.EvalCtx.NodeID()
+	log.Infof(ctx, "%s: the node executing the addsstable %d", "restore-perf-investigation",
+		cArgs.EvalCtx.NodeID())
 	mvccStartKey, mvccEndKey := storage.MVCCKey{Key: args.Key}, storage.MVCCKey{Key: args.EndKey}
 
 	// TODO(tschottdorf): restore the below in some form (gets in the way of testing).

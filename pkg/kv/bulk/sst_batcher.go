@@ -46,9 +46,23 @@ func (b sz) String() string {
 
 type SentSST struct {
 	nodeID        roachpb.NodeID
-	remotePrewait time.Duration
-	wait          time.Duration
-	sstSize       int
+	RemotePrewait time.Duration
+	Wait          time.Duration
+	SstSize       int
+}
+
+type FlushCounts struct {
+	total   int
+	split   int
+	sstSize int
+	files   int // a single flush might create multiple files.
+
+	SendWait  time.Duration
+	SplitWait time.Duration
+
+	failedDueToSplitTime time.Duration
+	failedSendTime       time.Duration
+	Recipients           map[roachpb.NodeID]SentSST
 }
 
 // SSTBatcher is a helper for bulk-adding many KVs in chunks via AddSSTable. An
@@ -69,6 +83,7 @@ type SSTBatcher struct {
 	// split and scattered and therefore it could be detrimental to reposition
 	// them.
 	ignoreMaxSizeWhenFlushing bool
+	nodeID                    roachpb.NodeID
 	splitAfter                func() int64
 
 	// allows ingestion of keys where the MVCC.Key would shadow an existing row.
@@ -94,19 +109,7 @@ type SSTBatcher struct {
 	// like totalRows, are accumulated _across_ batches and are not reset between
 	// batches when Reset() is called.
 	totalRows   roachpb.BulkOpSummary
-	flushCounts struct {
-		total   int
-		split   int
-		sstSize int
-		files   int // a single flush might create multiple files.
-
-		sendWait  time.Duration
-		splitWait time.Duration
-
-		failedDueToSplitTime time.Duration
-		failedSendTime       time.Duration
-		recipients           map[roachpb.NodeID]SentSST
-	}
+	flushCounts FlushCounts
 	// Tracking for if we have "filled" a range in case we want to split/scatter.
 	flushedToCurrentRange int64
 	lastFlushKey          []byte
@@ -126,6 +129,10 @@ type SSTBatcher struct {
 	rowCounter storage.RowCounter
 }
 
+func (b *SSTBatcher) NodeID() roachpb.NodeID {
+	return b.nodeID
+}
+
 // MakeSSTBatcher makes a ready-to-use SSTBatcher.
 func MakeSSTBatcher(
 	ctx context.Context,
@@ -133,9 +140,10 @@ func MakeSSTBatcher(
 	settings *cluster.Settings,
 	flushBytes func() int64,
 	ignoreMaxSizeWhenFlushing bool,
+	nodeID roachpb.NodeID,
 ) (*SSTBatcher, error) {
 	b := &SSTBatcher{db: db, settings: settings, maxSize: flushBytes, disallowShadowing: true,
-		ignoreMaxSizeWhenFlushing: ignoreMaxSizeWhenFlushing}
+		ignoreMaxSizeWhenFlushing: ignoreMaxSizeWhenFlushing, nodeID: nodeID}
 	err := b.Reset(ctx)
 	return b, err
 }
@@ -148,6 +156,10 @@ func MakeStreamSSTBatcher(
 	b := &SSTBatcher{db: db, settings: settings, maxSize: flushBytes, ingestAll: true}
 	err := b.Reset(ctx)
 	return b, err
+}
+
+func (b *SSTBatcher) FlushCounts() FlushCounts {
+	return b.flushCounts
 }
 
 func (b *SSTBatcher) updateMVCCStats(key storage.MVCCKey, value []byte) {
@@ -227,8 +239,8 @@ func (b *SSTBatcher) Reset(ctx context.Context) error {
 	b.ms.Reset()
 
 	b.rowCounter.BulkOpSummary.Reset()
-	if b.flushCounts.recipients == nil {
-		b.flushCounts.recipients = make(map[roachpb.NodeID]SentSST)
+	if b.flushCounts.Recipients == nil {
+		b.flushCounts.Recipients = make(map[roachpb.NodeID]SentSST)
 	}
 	return nil
 }
@@ -339,14 +351,14 @@ func (b *SSTBatcher) doFlush(ctx context.Context, reason int, nextKey roachpb.Ke
 	}
 	b.flushCounts.failedSendTime += timing.FailedSendTime
 	b.flushCounts.failedDueToSplitTime += timing.FailedDueToSplitTime
-	b.flushCounts.sendWait += timeutil.Since(beforeSend)
+	b.flushCounts.SendWait += timeutil.Since(beforeSend)
 
 	for _, f := range timing.Files {
-		sum := b.flushCounts.recipients[f.nodeID]
-		sum.sstSize += f.sstSize
-		sum.remotePrewait += f.remotePrewait
-		sum.wait += f.wait
-		b.flushCounts.recipients[f.nodeID] = sum
+		sum := b.flushCounts.Recipients[f.nodeID]
+		sum.SstSize += f.SstSize
+		sum.RemotePrewait += f.RemotePrewait
+		sum.Wait += f.Wait
+		b.flushCounts.Recipients[f.nodeID] = sum
 	}
 	b.flushCounts.files += len(timing.Files)
 	if b.flushKey != nil {
@@ -374,7 +386,7 @@ func (b *SSTBatcher) doFlush(ctx context.Context, reason int, nextKey roachpb.Ke
 					if err := b.db.SplitAndScatter(ctx, splitAt, hour); err != nil {
 						log.Warningf(ctx, "failed to split and scatter during ingest: %+v", err)
 					}
-					b.flushCounts.splitWait += timeutil.Since(beforeSplit)
+					b.flushCounts.SplitWait += timeutil.Since(beforeSplit)
 				}
 				b.flushedToCurrentRange = 0
 			}
@@ -525,7 +537,7 @@ func AddSSTable(
 		if err != nil {
 			return AddSSTableTimings{}, err
 		}
-		timings.Files = append(timings.Files, SentSST{nodeID: res.NodeID, remotePrewait: res.Prewait, wait: timeutil.Since(beforeSend), sstSize: len(item.sstBytes)})
+		timings.Files = append(timings.Files, SentSST{nodeID: res.NodeID, RemotePrewait: res.Prewait, Wait: timeutil.Since(beforeSend), SstSize: len(item.sstBytes)})
 		// explicitly deallocate SST. This will not deallocate the
 		// top level SST which is kept around to iterate over.
 		item.sstBytes = nil
