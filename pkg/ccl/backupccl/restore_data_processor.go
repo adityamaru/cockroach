@@ -26,9 +26,11 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/humanizeutil"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/protoutil"
+	"github.com/cockroachdb/cockroach/pkg/util/syncutil"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/cockroachdb/errors"
 	gogotypes "github.com/gogo/protobuf/types"
+	"golang.org/x/sync/errgroup"
 )
 
 // Progress is streamed to the coordinator through metadata.
@@ -217,27 +219,37 @@ func (rd *restoreDataProcessor) processRestoreSpanEntry(
 
 	// The sstables only contain MVCC data and no intents, so using an MVCC
 	// iterator is sufficient.
+	var mu syncutil.Mutex
 	var iters []storage.SimpleMVCCIterator
 
 	beforeItersOpen := timeutil.Now()
+	var group errgroup.Group
 	for _, file := range entry.Files {
-		log.VEventf(ctx, 2, "import file %s %s", file.Path, newSpanKey)
+		group.Go(func() error {
+			log.VEventf(ctx, 2, "import file %s %s", file.Path, newSpanKey)
 
-		dir, err := rd.flowCtx.Cfg.ExternalStorage(ctx, file.Dir)
-		if err != nil {
-			return summary, err
-		}
-		defer func() {
-			if err := dir.Close(); err != nil {
-				log.Warningf(ctx, "close export storage failed %v", err)
+			dir, err := rd.flowCtx.Cfg.ExternalStorage(ctx, file.Dir)
+			if err != nil {
+				return err
 			}
-		}()
-		iter, err := storageccl.ExternalSSTReader(ctx, dir, file.Path, rd.spec.Encryption)
-		if err != nil {
-			return summary, err
-		}
-		defer iter.Close()
-		iters = append(iters, iter)
+			defer func() {
+				if err := dir.Close(); err != nil {
+					log.Warningf(ctx, "close export storage failed %v", err)
+				}
+			}()
+			iter, err := storageccl.ExternalSSTReader(ctx, dir, file.Path, rd.spec.Encryption)
+			if err != nil {
+				return err
+			}
+			defer iter.Close()
+			mu.Lock()
+			defer mu.Unlock()
+			iters = append(iters, iter)
+			return nil
+		})
+	}
+	if err := group.Wait(); err != nil {
+		return summary, err
 	}
 	timeOpeningIters := timeutil.Since(beforeItersOpen)
 	rd.timing.totalIterators += timeOpeningIters

@@ -341,6 +341,7 @@ func (ssp *splitAndScatterProcessor) runSplitAndScatter(
 	for worker := 0; worker < splitScatterWorkers; worker++ {
 		g.GoCtx(func(ctx context.Context) error {
 			for importSpanChunk := range importSpanChunksCh {
+				chunkDestination := importSpanChunk.destination
 				log.Infof(ctx, "processing a chunk")
 				for i, importSpan := range importSpanChunk.entries {
 					log.Infof(ctx, "processing a span [%s,%s)", importSpan.Span.Key, importSpan.Span.EndKey)
@@ -354,9 +355,19 @@ func (ssp *splitAndScatterProcessor) runSplitAndScatter(
 						return err
 					}
 
+					if chunkDestination != destination {
+						log.Infof(ctx, "%s: ASSERTION FAILED %d != %d", restorePerfInvestigation,
+							chunkDestination, destination)
+					}
+
+					nodeID, ok := ssp.flowCtx.NodeID.OptionalNodeID()
+					if !ok {
+						log.Infof(ctx, "%s: failed to find the node ID of the curnode")
+						nodeID = destination
+					}
 					scatteredEntry := entryNode{
 						entry: importSpan,
-						node:  destination,
+						node:  nodeID,
 					}
 
 					select {
