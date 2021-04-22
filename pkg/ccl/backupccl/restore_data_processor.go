@@ -334,22 +334,25 @@ func (rd *restoreDataProcessor) processRestoreSpanEntry(
 		flushCount := rd.batcher.FlushCounts()
 		var localTimeToProcessAddSST, remoteTimeToProcessAddSST time.Duration
 		var localPreWaitTime, remotePreWaitTime time.Duration
+		var localHits, remoteHits int
 		for node, sentSST := range flushCount.Recipients {
 			if isLocal(node) {
 				localTimeToProcessAddSST += sentSST.Wait
 				localPreWaitTime += sentSST.RemotePrewait
+				localHits += sentSST.Hits
 			} else {
 				remoteTimeToProcessAddSST += sentSST.Wait
 				remotePreWaitTime += sentSST.RemotePrewait
+				remoteHits += sentSST.Hits
 			}
 		}
 		log.Infof(ctx, "%s: %d entries took %s ("+
-			"rate: %d ms/entry) to process remote AddSSTable and %s (rate: %d ms/entry) to process local"+
+			"requests: %d) to process remote AddSSTable and %s (requests: %d) to process local"+
 			" AddSSTable", restorePerfInvestigation, rd.timing.entryCount,
 			remoteTimeToProcessAddSST.String(),
-			remoteTimeToProcessAddSST.Milliseconds()/int64(rd.timing.entryCount),
+			remoteHits,
 			localTimeToProcessAddSST.String(),
-			localTimeToProcessAddSST.Milliseconds()/int64(rd.timing.entryCount))
+			localHits)
 
 		log.Infof(ctx, "%s: %d entries took %s to prewait remote AddSSTable and %s to"+
 			" prewait local AddSSTable", restorePerfInvestigation, rd.timing.entryCount,

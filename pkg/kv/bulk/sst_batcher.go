@@ -49,6 +49,7 @@ type SentSST struct {
 	RemotePrewait time.Duration
 	Wait          time.Duration
 	SstSize       int
+	Hits          int
 }
 
 type FlushCounts struct {
@@ -358,6 +359,7 @@ func (b *SSTBatcher) doFlush(ctx context.Context, reason int, nextKey roachpb.Ke
 		sum.SstSize += f.SstSize
 		sum.RemotePrewait += f.RemotePrewait
 		sum.Wait += f.Wait
+		sum.Hits++
 		b.flushCounts.Recipients[f.nodeID] = sum
 	}
 	b.flushCounts.files += len(timing.Files)
